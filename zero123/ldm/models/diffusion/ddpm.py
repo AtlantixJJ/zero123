@@ -1896,6 +1896,7 @@ class SimpleUpscaleDiffusion(LatentDiffusion):
                 log[f"samples_cfg_scale_{unconditional_guidance_scale:.2f}"] = x_samples_cfg
         return log
 
+
 class MultiCatFrameDiffusion(LatentDiffusion):
     def __init__(self, *args, low_scale_key="LR", **kwargs):
         super().__init__(*args, **kwargs)

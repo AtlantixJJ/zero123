@@ -4,7 +4,7 @@ cd stable-diffusion
 python gradio_new.py 0
 '''
 
-import diffusers  # 0.12.1
+#import diffusers  # 0.12.1
 import math
 import fire
 import gradio as gr
@@ -18,7 +18,7 @@ import sys
 import time
 import torch
 from contextlib import nullcontext
-from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
+#from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from einops import rearrange
 from functools import partial
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -320,9 +320,11 @@ def main_run(models, device, cam_vis, return_what,
     :param raw_im (PIL Image).
     '''
     
+    """
     safety_checker_input = models['clip_fe'](raw_im, return_tensors='pt').to(device)
     (image, has_nsfw_concept) = models['nsfw'](
         images=np.ones((1, 3)), clip_input=safety_checker_input.pixel_values)
+
     print('has_nsfw_concept:', has_nsfw_concept)
     if np.any(has_nsfw_concept):
         print('NSFW content detected.')
@@ -339,9 +341,9 @@ def main_run(models, device, cam_vis, return_what,
         else:
             to_return[0] = description
         return to_return
-
     else:
         print('Safety check passed.')
+    """
 
     input_im = preprocess_image(models, raw_im, preprocess)
 
@@ -468,7 +470,7 @@ def calc_cam_cone_pts_3d(polar_deg, azimuth_deg, radius_m, fov_deg):
 
 def run_demo(
         device_idx=_GPU_INDEX,
-        ckpt='105000.ckpt',
+        ckpt='../../../pretrained/105000.ckpt',
         config='configs/sd-objaverse-finetune-c_concat-256.yaml'):
 
     print('sys.argv:', sys.argv)
@@ -486,9 +488,10 @@ def run_demo(
     models['turncam'] = load_model_from_config(config, ckpt, device=device)
     print('Instantiating Carvekit HiInterface...')
     models['carvekit'] = create_carvekit_interface()
-    print('Instantiating StableDiffusionSafetyChecker...')
-    models['nsfw'] = StableDiffusionSafetyChecker.from_pretrained(
-        'CompVis/stable-diffusion-safety-checker').to(device)
+    #print('Instantiating StableDiffusionSafetyChecker...')
+    #models['nsfw'] = StableDiffusionSafetyChecker.from_pretrained(
+    #    'CompVis/stable-diffusion-safety-checker').to(device)
+    models['nsfw'] = None
     print('Instantiating AutoFeatureExtractor...')
     models['clip_fe'] = AutoFeatureExtractor.from_pretrained(
         'CompVis/stable-diffusion-safety-checker')
@@ -501,8 +504,8 @@ def run_demo(
     # models['nsfw'].special_care_embeds_weights:
     # [0.1950, 0.2000, 0.2200].
     # We multiply all by some factor > 1 to make them less likely to be triggered.
-    models['nsfw'].concept_embeds_weights *= 1.07
-    models['nsfw'].special_care_embeds_weights *= 1.07
+    #models['nsfw'].concept_embeds_weights *= 1.07
+    #models['nsfw'].special_care_embeds_weights *= 1.07
 
     with open('instructions.md', 'r') as f:
         article = f.read()
