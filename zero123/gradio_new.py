@@ -85,7 +85,6 @@ def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_sample
             c = model.cc_projection(c)
             cond = {}
             cond['c_crossattn'] = [c]
-            c_concat = model.encode_first_stage((input_im.to(c.device))).mode().detach()
             cond['c_concat'] = [model.encode_first_stage((input_im.to(c.device))).mode().detach()
                                 .repeat(n_samples, 1, 1, 1)]
             if scale != 1.0:
@@ -287,7 +286,6 @@ def preprocess_image(models, input_im, preprocess):
         input_im = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
         # (H, W, 3) array in [0, 1].
-
     else:
         input_im = input_im.resize([256, 256], Image.Resampling.LANCZOS)
         input_im = np.asarray(input_im, dtype=np.float32) / 255.0
