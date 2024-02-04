@@ -165,6 +165,7 @@ class NfpDataset(Dataset):
         im = Image.open(filename).convert("RGB")
         return self.tform(im)
 
+
 class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
                  test=None, num_workers=4, **kwargs):
@@ -267,8 +268,12 @@ class ObjaverseData(Dataset):
         d_theta = theta_target - theta_cond
         d_azimuth = (azimuth_target - azimuth_cond) % (2 * math.pi)
         d_z = z_target - z_cond
-        
-        d_T = torch.tensor([d_theta.item(), math.sin(d_azimuth.item()), math.cos(d_azimuth.item()), d_z.item()])
+
+        d_T = torch.tensor([
+            d_theta.item(),
+            math.sin(d_azimuth.item()),
+            math.cos(d_azimuth.item()),
+            d_z.item()])
         return d_T
 
     def load_im(self, path, color):
@@ -325,6 +330,7 @@ class ObjaverseData(Dataset):
     def process_im(self, im):
         im = im.convert("RGB")
         return self.tform(im)
+
 
 class FolderData(Dataset):
     def __init__(self,
@@ -408,6 +414,7 @@ class FolderData(Dataset):
         im = im.convert("RGB")
         return self.tform(im)
 import random
+
 
 class TransformDataset():
     def __init__(self, ds, extra_label="sksbspic"):

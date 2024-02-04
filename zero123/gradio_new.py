@@ -278,8 +278,6 @@ def preprocess_image(models, input_im, preprocess):
     :param input_im (PIL Image).
     :return input_im (H, W, 3) array in [0, 1].
     '''
-
-    print('old input_im:', input_im.size)
     start_time = time.time()
 
     if preprocess:
@@ -317,42 +315,8 @@ def main_run(models, device, cam_vis, return_what,
     '''
     :param raw_im (PIL Image).
     '''
-    
-    """
-    safety_checker_input = models['clip_fe'](raw_im, return_tensors='pt').to(device)
-    (image, has_nsfw_concept) = models['nsfw'](
-        images=np.ones((1, 3)), clip_input=safety_checker_input.pixel_values)
-
-    print('has_nsfw_concept:', has_nsfw_concept)
-    if np.any(has_nsfw_concept):
-        print('NSFW content detected.')
-        to_return = [None] * 10
-        description = ('###  <span style="color:red"> Unfortunately, '
-                       'potential NSFW content was detected, '
-                       'which is not supported by our model. '
-                       'Please try again with a different image. </span>')
-        if 'angles' in return_what:
-            to_return[0] = 0.0
-            to_return[1] = 0.0
-            to_return[2] = 0.0
-            to_return[3] = description
-        else:
-            to_return[0] = description
-        return to_return
-    else:
-        print('Safety check passed.')
-    """
 
     input_im = preprocess_image(models, raw_im, preprocess)
-
-    # if np.random.rand() < 0.3:
-    #     description = ('Unfortunately, a human, a face, or potential NSFW content was detected, '
-    #                    'which is not supported by our model.')
-    #     if vis_only:
-    #         return (None, None, description)
-    #     else:
-    #         return (None, None, None, description)
-
     show_in_im1 = (input_im * 255.0).astype(np.uint8)
     show_in_im2 = Image.fromarray(show_in_im1)
 
@@ -468,7 +432,7 @@ def calc_cam_cone_pts_3d(polar_deg, azimuth_deg, radius_m, fov_deg):
 
 def run_demo(
         device_idx=_GPU_INDEX,
-        ckpt='../../../pretrained/105000.ckpt',
+        ckpt='../../../pretrained/zero123-xl.ckpt',
         config='configs/sd-objaverse-finetune-c_concat-256.yaml'):
 
     print('sys.argv:', sys.argv)
