@@ -16,7 +16,7 @@ from contextlib import contextmanager, nullcontext
 from functools import partial
 import itertools
 from tqdm import tqdm
-from torchvision.utils import make_grid
+from torchvision.utils import make_grid, save_image
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from omegaconf import ListConfig
 
@@ -543,7 +543,7 @@ class LatentDiffusion(DDPM):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, batch, batch_idx):
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -1019,7 +1019,7 @@ class LatentDiffusion(DDPM):
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
-        logvar_t = self.logvar[t].to(self.device)
+        logvar_t = self.logvar.to(self.device)[t]
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
@@ -1033,6 +1033,15 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
         loss_dict.update({f'{prefix}/loss': loss})
+
+        #with torch.no_grad():
+        #    pred_z0 = self.predict_start_from_noise(x_noisy, t, model_output)
+        #    pred_x0 = self.decode_first_stage(pred_z0)
+        #    gt_x0 = self.decode_first_stage(x_start)
+        #    disp = torch.cat([pred_x0, gt_x0]) * 0.5 + 0.5
+        #    save_image(disp, f'./{prefix}_pred_x0.png', nrow=8)
+
+        #print(f'{loss.mean():.3f}')
 
         return loss, loss_dict
 

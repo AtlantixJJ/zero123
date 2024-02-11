@@ -1,34 +1,30 @@
-from typing import Dict
-import webdataset as wds
+import torch, copy, csv, cv2, math, json, random, os, sys
 import numpy as np
-from omegaconf import DictConfig, ListConfig
-import torch
-from torch.utils.data import Dataset
-from pathlib import Path
-import json
+import webdataset as wds
+import pytorch_lightning as pl
+import matplotlib.pyplot as plt
 from PIL import Image
+from typing import Dict
+from pathlib import Path
+from torch.utils.data import Dataset
+from omegaconf import DictConfig, ListConfig
 from torchvision import transforms
-import torchvision
 from einops import rearrange
+from os.path import join as osj
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torchvision.transforms import ToTensor, Compose, Resize, Lambda
+
+from .camera_helper import matrix_to_quaternion
 from ldm.util import instantiate_from_config
 from datasets import load_dataset
-import pytorch_lightning as pl
-import copy
-import csv
-import cv2
-import random
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
-import json
-import os, sys
-import webdataset as wds
-import math
-from torch.utils.data.distributed import DistributedSampler
+
 
 # Some hacky things to make experimentation easier
 def make_transform_multi_folder_data(paths, caption_files=None, **kwargs):
     ds = make_multi_folder_data(paths, caption_files, **kwargs)
     return TransformDataset(ds)
+
 
 def make_nfp_data(base_path):
     dirs = list(Path(base_path).glob("*/"))
@@ -169,7 +165,7 @@ class NfpDataset(Dataset):
 class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
                  test=None, num_workers=4, **kwargs):
-        super().__init__(self)
+        super().__init__()
         self.root_dir = root_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -181,12 +177,12 @@ class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
             dataset_config = validation
 
         if 'image_transforms' in dataset_config:
-            image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+            image_transforms = [Resize(dataset_config.image_transforms.size)]
         else:
             image_transforms = []
-        image_transforms.extend([transforms.ToTensor(),
-                                transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
-        self.image_transforms = torchvision.transforms.Compose(image_transforms)
+        image_transforms.extend([ToTensor(),
+                                Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
+        self.image_transforms = Compose(image_transforms)
 
 
     def train_dataloader(self):
@@ -204,6 +200,205 @@ class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
     def test_dataloader(self):
         return wds.WebLoader(ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=self.validation),\
                           batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+
+
+class FaceDataModuleFromConfig(pl.LightningDataModule):
+    def __init__(self, root_dir, ann_fpath, sample_acam=-1, resolution=512, batch_size=1, total_view=4, cond_radius=False, num_workers=4):
+        super().__init__()
+        self.root_dir = root_dir
+        self.ann_fpath = ann_fpath
+        self.sample_acam = sample_acam
+        self.resolution = resolution
+        self.batch_size = batch_size
+        self.total_view = total_view
+        self.cond_radius = cond_radius
+        self.num_workers = num_workers
+
+        self.transforms = Compose([
+            Resize(self.resolution),
+            ToTensor(),
+            Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
+
+    def train_dataloader(self):
+        dataset = MultiViewDataset(
+            root_dir=self.root_dir,
+            ann_fpath=self.ann_fpath,
+            cond_radius=self.cond_radius,
+            transforms=self.transforms)
+        sampler = DistributedSampler(dataset)
+        return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+
+    def val_dataloader(self):
+        dataset = MultiViewDataset(
+            root_dir=self.root_dir,
+            ann_fpath=self.ann_fpath,
+            cond_radius=self.cond_radius,
+            transforms=self.transforms)
+        sampler = DistributedSampler(dataset)
+        return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+    
+    def test_dataloader(self):
+        dataset = MultiViewDataset(
+            root_dir=self.root_dir,
+            ann_fpath=self.ann_fpath,
+            cond_radius=self.cond_radius,
+            transforms=self.transforms)
+        sampler = DistributedSampler(dataset)
+        return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+
+
+def imread_pil(fpath, size=None):
+    img = Image.open(open(fpath, "rb")).convert("RGB")
+    if size is not None:
+        img = img.resize(size, resample=Image.Resampling.BILINEAR)
+    return img
+
+
+class MultiViewDataset(torch.utils.data.Dataset):
+    """Multi-view dataset."""
+
+    def __init__(self, root_dir, ann_fpath, cond_radius=False, sample_acam=-1, xflip=False, transforms=None):
+        self.ann_fpath = ann_fpath
+        self.root_dir = root_dir
+        self.sample_acam = sample_acam # sample around camera, quaternion threshold
+        self.xflip = xflip
+        self.cond_radius = cond_radius # whether to use stable zero123 setup
+        self.scenes = torch.load(ann_fpath, map_location='cpu')
+        self.scene_names = list(self.scenes.keys())
+        self.scene_names.sort()
+        indice = []
+        for i, k in enumerate(self.scene_names):
+            s = self.scenes[k]
+            n_cam = len(s['_camdata_image_path'])
+            indice.append(np.stack([
+                i * np.ones((n_cam,)),
+                np.arange(n_cam)], 1))
+        self.sample_indice = np.concatenate(indice, 0).astype('int32')
+
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.sample_indice)
+
+    def get_camera_dict(self, scene_prefix, cam_dict, cam_idx):
+        """Get camera dictionary."""
+        dic = {k: v[cam_idx] for k, v in cam_dict.items()
+            if k.startswith('_camdata_') and v[cam_idx] is not None}
+
+        if '_camdata_image_path' in cam_dict:
+            image_path = osj(scene_prefix, cam_dict['_camdata_image_path'][cam_idx][1:])
+            dic['_camdata_image'] = self.transforms(imread_pil(image_path))
+
+        if '_camdata_depth_path' in cam_dict:
+            depth_path = osj(scene_prefix, cam_dict['_camdata_depth_path'][cam_idx][1:])
+            dic['_camdata_depth'] = torch.from_numpy(np.load(depth_path))
+
+        if '_camdata_mask_path' in cam_dict:
+            mask_path = osj(scene_prefix, cam_dict['_camdata_mask_path'][cam_idx][1:])
+            dic['_camdata_mask'] = self.transforms(imread_pil(mask_path))[:1]
+        return dic
+
+    def __getitem__(self, idx):
+        """
+        Returns:
+            scene_idx: int
+            camera_idx: int
+            camera: List of Camera object.
+            ref_image: torch.Tensor [3, H, W] in [0, 1]
+            gt_image: torch.Tensor [3, H, W] in [0, 1]
+            camera_extent: float
+        """
+        scene_idx, cam_idx = self.sample_indice[idx]
+        scene_name = self.scene_names[scene_idx]
+        scene_prefix = osj(self.root_dir, scene_name)
+
+        cam_dict = self.scenes[scene_name]
+        scene_image_fps = cam_dict['_camdata_image_path']
+
+        n_cam = len(scene_image_fps)
+
+        # random sample a camera as reference
+        refnear_cam_idx = -1
+        if self.sample_acam > 0:
+            cam2quat = lambda idx: matrix_to_quaternion(
+                torch.linalg.inv(
+                    cam_dict['_camdata_world_view_transform'][idx].T)[:3, :3])
+            gt_quat = cam2quat(cam_idx)
+            indices = np.arange(n_cam)
+            np.random.shuffle(indices)
+            for i in range(n_cam):
+                ref_quat = cam2quat(indices[i])
+                dist = (gt_quat - ref_quat).norm()
+                if dist < self.sample_acam and refnear_cam_idx != cam_idx:
+                    refnear_cam_idx = indices[i]
+                    break
+            if refnear_cam_idx == -1:
+                refnear_cam_idx = indices[0]
+                print("Warning: no camera found for sampling!")
+            refnear_camera = self.get_camera_dict(
+                scene_prefix, cam_dict, refnear_cam_idx)
+        
+        ref_cam_idx = np.random.randint(n_cam)
+        while ref_cam_idx in [cam_idx, refnear_cam_idx]:
+            ref_cam_idx = np.random.randint(n_cam)
+
+        ref_camera = self.get_camera_dict(scene_prefix, cam_dict, ref_cam_idx)
+        tar_camera = self.get_camera_dict(scene_prefix, cam_dict, cam_idx)
+
+        data = {
+            'scene_idx': scene_idx,
+            'camera_idx': cam_idx
+        }
+        #m = ref_camera['_camdata_mask']
+        #data['image_target'] = (ref_camera['_camdata_image'] * m) + 1 - m # white background
+        #m = tar_camera['_camdata_mask']
+        #data['image_cond'] = (tar_camera['_camdata_image'] * m) + 1 - m # white background
+        data['image_target'] = ref_camera['_camdata_image']
+        data['image_cond'] = tar_camera['_camdata_image']
+        data["T"] = self.get_T(
+            torch.inverse(ref_camera['_camdata_world_view_transform'].T),
+            torch.inverse(tar_camera['_camdata_world_view_transform'].T))
+
+        return data
+    
+    def cartesian_to_spherical(self, xyz):
+        ptsnew = np.hstack((xyz, np.zeros(xyz.shape)))
+        xy = xyz[:,0]**2 + xyz[:,1]**2
+        z = np.sqrt(xy + xyz[:,2]**2)
+        theta = np.arctan2(np.sqrt(xy), xyz[:,2]) # for elevation angle defined from Z-axis down
+        #ptsnew[:,4] = np.arctan2(xyz[:,2], np.sqrt(xy)) # for elevation angle defined from XY-plane up
+        azimuth = np.arctan2(xyz[:,1], xyz[:,0])
+        return np.array([theta, azimuth, z])
+
+    def get_T(self, target_cam2world, cond_cam2world):
+        M = torch.Tensor([ # conversion from COLMAP format to blender format
+            [1, 0, 0],
+            [0, 0, -1],
+            [0, 1, 0]]).to(target_cam2world)
+        
+        #R, T = target_RT[:3, :3], target_RT[:3, -1]
+        #T_target = M @ -R.T @ T #-R.T @ T #M @ -R.T @ T
+
+        #R, T = cond_RT[:3, :3], cond_RT[:3, -1]
+        #T_cond = M @ -R.T @ T #-R.T @ T #M @ -R.T @ T
+        T_cond = M @ cond_cam2world[:3, -1]
+        T_target = M @ target_cam2world[:3, -1]
+
+        theta_cond, azimuth_cond, radius_cond = self.cartesian_to_spherical(T_cond[None, :])
+        theta_target, azimuth_target, radius_target = self.cartesian_to_spherical(T_target[None, :])
+        
+        d_theta = theta_target - theta_cond
+        d_azimuth = (azimuth_target - azimuth_cond) % (2 * math.pi)
+        d_radius = radius_target - radius_cond
+
+        d_T = torch.tensor([
+            d_theta.item(), math.sin(d_azimuth.item()), math.cos(d_azimuth.item()),
+            d_radius.item() if self.cond_radius else theta_cond.item()])
+        #print(f'cond radius {radius_cond.item():.3f} target radius {radius_target.item():.3f}')
+        #print(T_cond)
+        #print(T_target)
+        #print(d_T)
+        return d_T
 
 
 class ObjaverseData(Dataset):

@@ -118,9 +118,9 @@ def write_video(output_path, frames, fps=24):
     clip.write_videofile(output_path,
         codec='libx264', fps=fps,
         preset='ultrafast', threads=1)
-    
 
-ddim_steps = 20
+
+ddim_steps = 50
 n_samples = 1
 
 expr_dir = '../../../expr/zero123'
@@ -144,15 +144,15 @@ models['carvekit'] = create_carvekit_interface()
 sampler = DDIMSampler(models['turncam'])
 h, w = 256, 256
 scale = 3.0
-ddim_eta = 0.2
+ddim_eta = 1.0
 
 delta_azims, delta_elevs = get_rotating_angles()
-delta_azims = np.degrees(delta_azims) # delta azimuth
-delta_elevs = np.degrees(delta_elevs) # delta elevation
+delta_azims = np.rad2deg(delta_azims) # delta azimuth
+delta_elevs = np.rad2deg(delta_elevs) # delta elevation
 delta_radius = np.zeros_like(delta_azims) # delta radius
 
 for image_name in ['anya_rgba.png', 'face_centered.jpg', 'face_uncentered.png']:
-    name = name.split('.')[0]
+    name = image_name.split('.')[0]
     image_fpath = f'../data/{image_name}'
     raw_im = Image.open(image_fpath)
     input_im = preprocess_image(models, raw_im, preprocess=True)

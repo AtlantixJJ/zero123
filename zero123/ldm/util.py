@@ -66,6 +66,11 @@ def load_and_preprocess(interface, input_im):
     :return image (H, W, 3) array in [0, 1].
     '''
     # See https://github.com/Ir1d/image-background-remove-tool
+
+    if input_im.mode == 'RGBA':
+        arr = np.asarray(input_im)
+        arr = arr[:, :, :3] * (arr[:, :, 3:4] / 255.0) + 255 * (1 - arr[:, :, 3:4] / 255.0)
+        input_im = Image.fromarray(arr.astype(np.uint8))
     image = input_im.convert('RGB')
 
     image_without_background = interface([image])[0]
@@ -77,12 +82,19 @@ def load_and_preprocess(interface, input_im):
     x, y, w, h = cv2.boundingRect(foreground.astype(np.uint8))
     image = image[y:y+h, x:x+w, :]
     image = PIL.Image.fromarray(np.array(image))
-    
+
     # resize image such that long edge is 512
     #image.thumbnail([200, 200], Image.Resampling.LANCZOS)
-    #image = add_margin(image, (255, 255, 255), size=256)
+    W, H = image.size
+    if W > H:
+        H, W = int(256 * H / W), 256
+    else:
+        H, W = 256, int(256 * W / H)
+    image = image.resize([W, H], Image.Resampling.LANCZOS)
+    print("resize", image.size)
+    image = add_margin(image, (255, 255, 255), size=256)
     image = np.array(image)
-    
+
     return image
 
 

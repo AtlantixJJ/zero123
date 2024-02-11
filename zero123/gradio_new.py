@@ -73,13 +73,23 @@ def load_model_from_config(config, ckpt, device, verbose=False):
 
 @torch.no_grad()
 def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_samples, scale,
-                 ddim_eta, x, y, z):
+                 ddim_eta, x, y, z, use_stable_zero123=False, conditioning_elevation=0):
     precision_scope = autocast if precision == 'autocast' else nullcontext
+    T_fn = lambda x, y, z: torch.tensor([
+                math.radians(x),
+                math.sin(math.radians(y)),
+                math.cos(math.radians(y)),
+                z])
+    if use_stable_zero123:
+        T_fn = lambda x, y, z: torch.tensor([
+                math.radians(x), # the delta direction is opposite
+                math.sin(math.radians(y)),
+                math.cos(math.radians(y)),
+                math.radians(conditioning_elevation + 90)])
     with precision_scope('cuda'):
         with model.ema_scope():
             c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
-            T = torch.tensor([math.radians(x), math.sin(
-                math.radians(y)), math.cos(math.radians(y)), z])
+            T = T_fn(x, y, z)
             T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
             c = torch.cat([c, T], dim=-1)
             c = model.cc_projection(c)
@@ -308,10 +318,10 @@ def preprocess_image(models, input_im, preprocess):
 
 
 def main_run(models, device, cam_vis, return_what,
-             x=0.0, y=0.0, z=0.0,
+             x=0.0, y=0.0, z=0.0, conditioning_elevation=0.0,
              raw_im=None, preprocess=True,
              scale=3.0, n_samples=4, ddim_steps=50, ddim_eta=1.0,
-             precision='fp32', h=256, w=256):
+             precision='fp32', h=256, w=256, use_stable_zero123=False):
     '''
     :param raw_im (PIL Image).
     '''
@@ -349,7 +359,8 @@ def main_run(models, device, cam_vis, return_what,
         # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
         used_x = x  # NOTE: Set this way for consistency.
         x_samples_ddim = sample_model(input_im, models['turncam'], sampler, precision, h, w,
-                                      ddim_steps, n_samples, scale, ddim_eta, used_x, y, z)
+                                      ddim_steps, n_samples, scale, ddim_eta, used_x, y, z,
+                                      use_stable_zero123, conditioning_elevation)
 
         output_ims = []
         for x_sample in x_samples_ddim:
@@ -432,14 +443,9 @@ def calc_cam_cone_pts_3d(polar_deg, azimuth_deg, radius_m, fov_deg):
 
 def run_demo(
         device_idx=_GPU_INDEX,
-        ckpt='../../../pretrained/zero123-xl.ckpt',
+        #ckpt='../../../pretrained/zero123-xl.ckpt',
+        ckpt='../../threestudio/load/zero123/stable_zero123.ckpt',
         config='configs/sd-objaverse-finetune-c_concat-256.yaml'):
-
-    print('sys.argv:', sys.argv)
-    if len(sys.argv) > 1:
-        print('old device_idx:', device_idx)
-        device_idx = int(sys.argv[1])
-        print('new device_idx:', device_idx)
 
     device = f'cuda:{device_idx}'
     config = OmegaConf.load(config)
@@ -450,24 +456,13 @@ def run_demo(
     models['turncam'] = load_model_from_config(config, ckpt, device=device)
     print('Instantiating Carvekit HiInterface...')
     models['carvekit'] = create_carvekit_interface()
-    #print('Instantiating StableDiffusionSafetyChecker...')
-    #models['nsfw'] = StableDiffusionSafetyChecker.from_pretrained(
-    #    'CompVis/stable-diffusion-safety-checker').to(device)
     models['nsfw'] = None
     print('Instantiating AutoFeatureExtractor...')
     models['clip_fe'] = AutoFeatureExtractor.from_pretrained(
         'CompVis/stable-diffusion-safety-checker')
-
-    # Reduce NSFW false positives.
-    # NOTE: At the time of writing, and for diffusers 0.12.1, the default parameters are:
-    # models['nsfw'].concept_embeds_weights:
-    # [0.1800, 0.1900, 0.2060, 0.2100, 0.1950, 0.1900, 0.1940, 0.1900, 0.1900, 0.2200, 0.1900,
-    #  0.1900, 0.1950, 0.1984, 0.2100, 0.2140, 0.2000].
-    # models['nsfw'].special_care_embeds_weights:
-    # [0.1950, 0.2000, 0.2200].
-    # We multiply all by some factor > 1 to make them less likely to be triggered.
-    #models['nsfw'].concept_embeds_weights *= 1.07
-    #models['nsfw'].special_care_embeds_weights *= 1.07
+    use_stable_zero123 = 'stable' in ckpt
+    if use_stable_zero123:
+        print('Use StableZero123 angle conditioning')
 
     with open('instructions.md', 'r') as f:
         article = f.read()
@@ -498,6 +493,10 @@ def run_demo(
                     random_btn = gr.Button('Random Rotation', variant='primary')
                     below_btn = gr.Button('View from Below', variant='primary')
                     behind_btn = gr.Button('View from Behind', variant='primary')
+                
+                gr.Markdown('*Require an estimate of input elevation for StableZero123:*')
+                cond_elev_slider = gr.Slider(
+                    -90, 90, value=0, step=5, label='Elevation angle (0 at the middle, top is positive)')
 
                 gr.Markdown('*Control camera position manually:*')
                 polar_slider = gr.Slider(
@@ -530,8 +529,8 @@ def run_demo(
                 vis_output = gr.Plot(
                     label='Relationship between input (green) and output (blue) camera poses')
 
-                gen_output = gr.Gallery(label='Generated images from specified new viewpoint')
-                gen_output.style(grid=2)
+                gen_output = gr.Gallery(label='Generated images from specified new viewpoint', columns=2)
+                #gen_output.style(grid=2)
 
                 preproc_output = gr.Image(type='pil', image_mode='RGB',
                                           label='Preprocessed input image', visible=_SHOW_INTERMEDIATE)
@@ -586,38 +585,39 @@ def run_demo(
         cam_vis = CameraVisualizer(vis_output)
 
         vis_btn.click(fn=partial(main_run, models, device, cam_vis, 'vis'),
-                      inputs=[polar_slider, azimuth_slider, radius_slider,
+                      inputs=[polar_slider, azimuth_slider, radius_slider, cond_elev_slider,
                               image_block, preprocess_chk],
                       outputs=[desc_output, vis_output, preproc_output])
 
-        run_btn.click(fn=partial(main_run, models, device, cam_vis, 'gen'),
-                      inputs=[polar_slider, azimuth_slider, radius_slider,
-                              image_block, preprocess_chk,
-                              scale_slider, samples_slider, steps_slider],
-                      outputs=[desc_output, vis_output, preproc_output, gen_output])
+        run_btn.click(fn=partial(main_run, models, device, cam_vis, 'gen',
+                    use_stable_zero123=use_stable_zero123),
+                    inputs=[polar_slider, azimuth_slider, radius_slider, cond_elev_slider,
+                            image_block, preprocess_chk,
+                            scale_slider, samples_slider, steps_slider],
+                    outputs=[desc_output, vis_output, preproc_output, gen_output])
 
         # NEW:
-        preset_inputs = [image_block, preprocess_chk,
+        preset_inputs = [cond_elev_slider, image_block, preprocess_chk,
                          scale_slider, samples_slider, steps_slider]
         preset_outputs = [polar_slider, azimuth_slider, radius_slider,
                           desc_output, vis_output, preproc_output, gen_output]
         left_btn.click(fn=partial(main_run, models, device, cam_vis, 'angles_gen',
-                                  0.0, -90.0, 0.0),
+                                  0.0, -90.0, 0.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
         above_btn.click(fn=partial(main_run, models, device, cam_vis, 'angles_gen',
-                                   -90.0, 0.0, 0.0),
+                                   -90.0, 0.0, 0.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
         right_btn.click(fn=partial(main_run, models, device, cam_vis, 'angles_gen',
-                                   0.0, 90.0, 0.0),
+                                   0.0, 90.0, 0.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
         random_btn.click(fn=partial(main_run, models, device, cam_vis, 'rand_angles_gen',
-                                    -1.0, -1.0, -1.0),
+                                    -1.0, -1.0, -1.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
         below_btn.click(fn=partial(main_run, models, device, cam_vis, 'angles_gen',
-                                   90.0, 0.0, 0.0),
+                                   90.0, 0.0, 0.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
         behind_btn.click(fn=partial(main_run, models, device, cam_vis, 'angles_gen',
-                                    0.0, 180.0, 0.0),
+                                    0.0, 180.0, 0.0, use_stable_zero123=use_stable_zero123),
                        inputs=preset_inputs, outputs=preset_outputs)
 
     demo.launch(enable_queue=True, share=True)
