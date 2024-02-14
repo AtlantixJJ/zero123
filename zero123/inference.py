@@ -1,6 +1,7 @@
 import math
 import torch
 import numpy as np
+import argparse
 from einops import rearrange
 from omegaconf import OmegaConf
 from PIL import Image
@@ -55,19 +56,25 @@ def load_model_from_config(config, ckpt, device, verbose=False):
 
 
 @torch.no_grad()
-def sample_model(
-    input_im, model, sampler, precision, h, w, ddim_steps, n_samples, scale, ddim_eta,
-    x, y, z):
+def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_samples, scale,
+                 ddim_eta, x, y, z, use_stable_zero123=False, conditioning_elevation=0):
     precision_scope = autocast if precision == 'autocast' else nullcontext
-    with precision_scope('cuda'):
-        with model.ema_scope():
-            c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
-            T = torch.tensor([
+    T_fn = lambda x, y, z: torch.tensor([
                 math.radians(x),
                 math.sin(math.radians(y)),
                 math.cos(math.radians(y)),
-                z]).to(c)
-            T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
+                z])
+    if use_stable_zero123:
+        T_fn = lambda x, y, z: torch.tensor([
+                math.radians(x), # the delta direction is opposite
+                math.sin(math.radians(y)),
+                math.cos(math.radians(y)),
+                math.radians(conditioning_elevation + 90)])
+    with precision_scope('cuda'):
+        with model.ema_scope():
+            c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
+            T = T_fn(x, y, z)
+            T = T[None, None, :].repeat(n_samples, 1, 1).to(c)
             c = torch.cat([c, T], dim=-1)
             c = model.cc_projection(c)
             cond = {}
@@ -82,14 +89,19 @@ def sample_model(
                 uc = None
 
             shape = [4, h // 8, w // 8]
-            samples_ddim, _ = sampler.sample(
-                S=ddim_steps, conditioning=cond,
-                batch_size=n_samples, shape=shape, verbose=False,
-                unconditional_guidance_scale=scale, unconditional_conditioning=uc,
-                eta=ddim_eta, x_T=None)
-            x_samples_ddim=model.decode_first_stage(samples_ddim)
-            return torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0).cpu()
+            samples_ddim, _ = sampler.sample(S=ddim_steps,
+                                             conditioning=cond,
+                                             batch_size=n_samples,
+                                             shape=shape,
+                                             verbose=False,
+                                             unconditional_guidance_scale=scale,
+                                             unconditional_conditioning=uc,
+                                             eta=ddim_eta,
+                                             x_T=None)
 
+            x_samples_ddim = model.decode_first_stage(samples_ddim)
+            return torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0).cpu()
+        
 
 def get_rotating_angles(
         n_steps=120,
@@ -120,52 +132,60 @@ def write_video(output_path, frames, fps=24):
         preset='ultrafast', threads=1)
 
 
-ddim_steps = 50
-n_samples = 1
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--name", type=str, default="orig")
+    parser.add_argument("--model", type=str, default="../../threestudio/load/zero123/stable_zero123.ckpt")
+    parser.add_argument("--data_dir", type=str, default="../../dreamgaussian/data")
+    parser.add_argument("--expr_dir", type=str, default="../../../expr/zero123")
+    args = parser.parse_args()
 
-expr_dir = '../../../expr/zero123'
-ckpt = '../../../pretrained/zero123-xl.ckpt'
-config = 'configs/sd-objaverse-finetune-c_concat-256.yaml'
-device = f'cuda:0'
-precision = 'autocast'
-SIZE = 256
-proc_fn = Compose([
-    Resize([SIZE, SIZE]),
-    ToTensor(),
-    Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
+    ddim_steps = 50
+    n_samples = 1
+    conditioning_elevation = 0
+    ckpt = args.model
+    use_stable_zero123 = 'stable' in ckpt
+    config = 'configs/sd-objaverse-finetune-c_concat-256.yaml'
+    device = f'cuda:0'
+    precision = 'autocast'
+    SIZE = 256
+    proc_fn = Compose([
+        Resize([SIZE, SIZE]),
+        ToTensor(),
+        Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
 
-config = OmegaConf.load(config)
+    config = OmegaConf.load(config)
 
-# Instantiate all models beforehand for efficiency.
-models = dict()
-models['turncam'] = load_model_from_config(config, ckpt, device=device)
-models['carvekit'] = create_carvekit_interface()
+    # Instantiate all models beforehand for efficiency.
+    models = dict()
+    models['turncam'] = load_model_from_config(config, ckpt, device=device)
+    models['carvekit'] = create_carvekit_interface()
 
-sampler = DDIMSampler(models['turncam'])
-h, w = 256, 256
-scale = 3.0
-ddim_eta = 1.0
+    sampler = DDIMSampler(models['turncam'])
+    h, w = 256, 256
+    scale = 3.0
+    ddim_eta = 1.0
 
-delta_azims, delta_elevs = get_rotating_angles()
-delta_azims = np.rad2deg(delta_azims) # delta azimuth
-delta_elevs = np.rad2deg(delta_elevs) # delta elevation
-delta_radius = np.zeros_like(delta_azims) # delta radius
+    delta_azims, delta_elevs = get_rotating_angles()
+    delta_azims = np.rad2deg(delta_azims) # delta azimuth
+    delta_elevs = np.rad2deg(delta_elevs) # delta elevation
+    delta_radius = np.zeros_like(delta_azims) # delta radius
 
-for image_name in ['anya_rgba.png', 'face_centered.jpg', 'face_uncentered.png']:
-    name = image_name.split('.')[0]
-    image_fpath = f'../data/{image_name}'
-    raw_im = Image.open(image_fpath)
-    input_im = preprocess_image(models, raw_im, preprocess=True)
-    input_im = Image.fromarray((input_im * 255.0).astype(np.uint8))
-    input_im.save(f'{expr_dir}/{name}_input.jpg')
-    input_im = proc_fn(input_im)[None].to(device)
-    frames = []
-    for x, y, z in zip(delta_elevs, delta_azims, delta_radius):
-        x_samples_ddim = sample_model(
-            input_im, models['turncam'], sampler, precision, h, w,
-            ddim_steps, n_samples, scale, ddim_eta,
-            x, y, z)
-        image = 255.0 * x_samples_ddim[0].cpu().numpy()
-        frames.append(rearrange(image, 'c h w -> h w c').astype('uint8'))
+    for image_name in ['face_centered_rgba.png', 'train_face_rgba.png']:
+        name = image_name.split('.')[0]
+        image_fpath = f'{args.data_dir}/{image_name}'
+        raw_im = Image.open(image_fpath)
+        input_im = preprocess_image(models, raw_im, preprocess=True)
+        input_im = Image.fromarray((input_im * 255.0).astype(np.uint8))
+        input_im.save(f'{args.expr_dir}/{name}_input.jpg')
+        input_im = proc_fn(input_im)[None].to(device)
+        frames = []
+        for x, y, z in zip(delta_elevs, delta_azims, delta_radius):
+            x_samples_ddim = sample_model(
+                input_im, models['turncam'], sampler, precision, h, w,
+                ddim_steps, n_samples, scale, ddim_eta,
+                x, y, z, use_stable_zero123, conditioning_elevation)
+            image = 255.0 * x_samples_ddim[0].cpu().numpy()
+            frames.append(rearrange(image, 'c h w -> h w c').astype('uint8'))
 
-    write_video(f'{expr_dir}/{name}_render_rotate.mp4', frames, fps=24)
+        write_video(f'{args.expr_dir}/{args.name}_{name}_render_rotate.mp4', frames, fps=24)
